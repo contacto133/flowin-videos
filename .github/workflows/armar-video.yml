@@ -1,0 +1,43 @@
+name: Armar video FlowIn
+
+on:
+  repository_dispatch:
+    types: [armar_video]
+
+permissions:
+  contents: write
+
+jobs:
+  video:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Instalar ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
+      - name: Armar video vertical con los slides
+        env:
+          IMGS: ${{ github.event.client_payload.imagenes }}
+          SEG: ${{ github.event.client_payload.segundos }}
+        run: |
+          set -e
+          SEG=${SEG:-3}
+          i=0
+          : > lista.txt
+          for u in $IMGS; do
+            curl -sSL "$u" -o "img$i.jpg"
+            # 1080x1920 (vertical): el slide 4:5 centrado sobre fondo navy de FlowIn, con un zoom suave y fundido
+            ffmpeg -y -loglevel error -framerate 30 -loop 1 -t "$SEG" -i "img$i.jpg" \
+              -vf "scale=1080:-2,zoompan=z='min(zoom+0.0006,1.04)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1350:fps=30,pad=1080:1920:0:285:color=0x0F1117,fade=t=in:st=0:d=0.25,fade=t=out:st=$(echo "$SEG - 0.25" | bc):d=0.25,format=yuv420p" \
+              -r 30 -c:v libx264 -preset veryfast -crf 20 "seg$i.mp4"
+            echo "file 'seg$i.mp4'" >> lista.txt
+            i=$((i+1))
+          done
+          ffmpeg -y -loglevel error -f concat -safe 0 -i lista.txt -f lavfi -i anullsrc=r=44100:cl=stereo \
+            -c:v copy -c:a aac -shortest -movflags +faststart video.mp4
+          ls -la video.mp4
+
+      - name: Publicar el video
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.client_payload.tag }}
+        run: gh release create "$TAG" video.mp4 --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Video FlowIn"
