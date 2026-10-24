@@ -2,13 +2,14 @@ name: Armar video FlowIn
 
 on:
   repository_dispatch:
-    types: [armar_video]
+    types: [armar_video, combinar_video]
 
 permissions:
   contents: write
 
 jobs:
   video:
+    if: github.event.action == 'armar_video'
     runs-on: ubuntu-latest
     steps:
       - name: Instalar ffmpeg
@@ -41,3 +42,46 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.client_payload.tag }}
         run: gh release create "$TAG" video.mp4 --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Video FlowIn"
+
+  reel:
+    if: github.event.action == 'combinar_video'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Instalar ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core bc
+
+      - name: Combinar presentadora (HeyGen) con imagenes
+        env:
+          AV: ${{ github.event.client_payload.avatar }}
+          IMGS: ${{ github.event.client_payload.imagenes }}
+          ESC: ${{ github.event.client_payload.escenas }}
+        run: |
+          set -e
+          curl -sSL "$AV" -o avatar.mp4
+          D=$(ffprobe -v error -show_entries format=duration -of csv=p=0 avatar.mp4)
+          read -ra IM <<< "$IMGS"
+          k=0; for u in "${IM[@]}"; do curl -sSL "$u" -o "img$k.jpg"; k=$((k+1)); done
+          NIMG=$k
+          TOT=0; for e in $ESC; do TOT=$((TOT + ${e#*:})); done
+          INPUTS="-i avatar.mp4"
+          FIL="[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[b0]"
+          ACC=0; n=0; j=0; last="b0"
+          for e in $ESC; do
+            t=${e%%:*}; w=${e#*:}
+            a=$(echo "$D * $ACC / $TOT" | bc -l); ACC=$((ACC + w)); b=$(echo "$D * $ACC / $TOT" | bc -l)
+            if [ "$t" = "I" ] && [ "$NIMG" -gt 0 ]; then
+              idx=$((j % NIMG)); j=$((j+1)); n=$((n+1))
+              INPUTS="$INPUTS -loop 1 -t $D -i img$idx.jpg"
+              FIL="$FIL;[$n:v]scale=1080:-2,pad=1080:1920:0:(1920-ih)/2:color=0x0F1117,setsar=1[i$n];[$last][i$n]overlay=0:0:enable='between(t,$a,$b)'[b$n]"
+              last="b$n"
+            fi
+          done
+          FIL="$FIL;[$last]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='Video generado con IA':fontcolor=white@0.9:fontsize=30:x=(w-tw)/2:y=70:box=1:boxcolor=black@0.35:boxborderw=12[out]"
+          ffmpeg -y -loglevel error $INPUTS -filter_complex "$FIL" -map "[out]" -map 0:a? -c:v libx264 -preset veryfast -crf 20 -r 30 -c:a aac -t "$D" -movflags +faststart video.mp4
+          ls -la video.mp4
+
+      - name: Publicar el video
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.client_payload.tag }}
+        run: gh release create "$TAG" video.mp4 --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "Reel FlowIn"
