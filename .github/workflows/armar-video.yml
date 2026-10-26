@@ -57,27 +57,49 @@ jobs:
           ESC: ${{ github.event.client_payload.escenas }}
         run: |
           set -e
-          curl -sSL "$AV" -o avatar.mp4
-          D=$(ffprobe -v error -show_entries format=duration -of csv=p=0 avatar.mp4)
+          read -ra AVS <<< "$AV"
+          read -ra TIP <<< "$ESC"
           read -ra IM <<< "$IMGS"
           k=0; for u in "${IM[@]}"; do curl -sSL "$u" -o "img$k.jpg"; k=$((k+1)); done
           NIMG=$k
-          TOT=0; for e in $ESC; do TOT=$((TOT + ${e#*:})); done
-          INPUTS="-i avatar.mp4"
-          FIL="[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[b0]"
-          ACC=0; n=0; j=0; last="b0"
-          for e in $ESC; do
-            t=${e%%:*}; w=${e#*:}
-            a=$(echo "$D * $ACC / $TOT" | bc -l); ACC=$((ACC + w)); b=$(echo "$D * $ACC / $TOT" | bc -l)
-            if [ "$t" = "I" ] && [ "$NIMG" -gt 0 ]; then
-              idx=$((j % NIMG)); j=$((j+1)); n=$((n+1))
-              INPUTS="$INPUTS -loop 1 -t $D -i img$idx.jpg"
-              FIL="$FIL;[$n:v]scale=1080:-2,pad=1080:1920:0:(1920-ih)/2:color=0x0F1117,setsar=1[i$n];[$last][i$n]overlay=0:0:enable='between(t,$a,$b)'[b$n]"
-              last="b$n"
-            fi
-          done
-          FIL="$FIL;[$last]drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='Video generado con IA':fontcolor=white@0.9:fontsize=30:x=(w-tw)/2:y=70:box=1:boxcolor=black@0.35:boxborderw=12[out]"
-          ffmpeg -y -loglevel error $INPUTS -filter_complex "$FIL" -map "[out]" -map 0:a? -c:v libx264 -preset veryfast -crf 20 -r 30 -c:a aac -t "$D" -movflags +faststart video.mp4
+          ROT="drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:text='Video generado con IA':fontcolor=white@0.9:fontsize=30:x=(w-tw)/2:y=70:box=1:boxcolor=black@0.35:boxborderw=12"
+          if [[ "$ESC" == *:* ]]; then
+            # Formato anterior: un solo clip de la presentadora, con imagenes superpuestas por tiempo
+            curl -sSL "${AVS[0]}" -o avatar.mp4
+            D=$(ffprobe -v error -show_entries format=duration -of csv=p=0 avatar.mp4)
+            TOT=0; for e in $ESC; do TOT=$((TOT + ${e#*:})); done
+            INPUTS="-i avatar.mp4"
+            FIL="[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[b0]"
+            ACC=0; n=0; j=0; last="b0"
+            for e in $ESC; do
+              t=${e%%:*}; w=${e#*:}
+              a=$(echo "$D * $ACC / $TOT" | bc -l); ACC=$((ACC + w)); b=$(echo "$D * $ACC / $TOT" | bc -l)
+              if [ "$t" = "I" ] && [ "$NIMG" -gt 0 ]; then
+                idx=$((j % NIMG)); j=$((j+1)); n=$((n+1))
+                INPUTS="$INPUTS -loop 1 -t $D -i img$idx.jpg"
+                FIL="$FIL;[$n:v]scale=1080:-2,pad=1080:1920:0:(1920-ih)/2:color=0x0F1117,setsar=1[i$n];[$last][i$n]overlay=0:0:enable='between(t,$a,$b)'[b$n]"
+                last="b$n"
+              fi
+            done
+            FIL="$FIL;[$last]$ROT[out]"
+            ffmpeg -y -loglevel error $INPUTS -filter_complex "$FIL" -map "[out]" -map 0:a? -c:v libx264 -preset veryfast -crf 20 -r 30 -c:a aac -t "$D" -movflags +faststart video.mp4
+          else
+            # Formato nuevo: un clip por escena (cada uno en su escena de oficina); en las escenas de imagen se ve el slide y sigue la voz
+            : > lista.txt; j=0
+            for k in "${!AVS[@]}"; do
+              curl -sSL "${AVS[$k]}" -o "av$k.mp4"
+              t=${TIP[$k]:-P}
+              if [ "$t" = "I" ] && [ "$NIMG" -gt 0 ]; then
+                idx=$((j % NIMG)); j=$((j+1))
+                ffmpeg -y -loglevel error -i "av$k.mp4" -loop 1 -i "img$idx.jpg" -filter_complex "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[b];[1:v]scale=1080:-2,pad=1080:1920:0:(1920-ih)/2:color=0x0F1117,setsar=1[i];[b][i]overlay=0:0:shortest=1,fps=30,format=yuv420p[v]" -map "[v]" -map 0:a -c:v libx264 -preset veryfast -crf 20 -c:a aac -ar 44100 -ac 2 "c$k.mp4"
+              else
+                ffmpeg -y -loglevel error -i "av$k.mp4" -vf "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30,format=yuv420p" -map 0:v -map 0:a -c:v libx264 -preset veryfast -crf 20 -c:a aac -ar 44100 -ac 2 "c$k.mp4"
+              fi
+              echo "file 'c$k.mp4'" >> lista.txt
+            done
+            ffmpeg -y -loglevel error -f concat -safe 0 -i lista.txt -c copy unido.mp4
+            ffmpeg -y -loglevel error -i unido.mp4 -vf "$ROT" -c:v libx264 -preset veryfast -crf 20 -c:a copy -movflags +faststart video.mp4
+          fi
           ls -la video.mp4
 
       - name: Publicar el video
